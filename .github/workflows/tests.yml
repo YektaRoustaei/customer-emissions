@@ -1,0 +1,99 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Format check
+        run: python -m ruff format --check .
+
+      - name: Run tests with coverage
+        id: tests
+        run: |
+          python -m pytest tests/ -v \
+            --cov=services \
+            --cov-report=term-missing \
+            --cov-report=json \
+            2>&1 | tee test_output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        env:
+          CARBON_API_BASE_URL: https://api.carbonintensity.org.uk/regional/postcode
+
+      - name: Post PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const output = fs.readFileSync('test_output.txt', 'utf8');
+            const coverage = JSON.parse(fs.readFileSync('coverage.json', 'utf8'));
+            const pct = coverage.totals.percent_covered.toFixed(1);
+
+            const passed = (output.match(/(\d+) passed/) || [])[1] || '0';
+            const failed = (output.match(/(\d+) failed/) || [])[1] || '0';
+            const status = failed === '0' ? '✅ All tests passed' : `❌ ${failed} test(s) failed`;
+
+            const body = [
+              `## Test Results`,
+              `${status}`,
+              ``,
+              `| | |`,
+              `|---|---|`,
+              `| Passed | ${passed} |`,
+              `| Failed | ${failed} |`,
+              `| Coverage | ${pct}% |`,
+              ``,
+              `<details><summary>Full output</summary>`,
+              ``,
+              `\`\`\``,
+              output,
+              `\`\`\``,
+              `</details>`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body.startsWith('## Test Results'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
